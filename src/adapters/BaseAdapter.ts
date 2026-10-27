@@ -61,6 +61,19 @@ export abstract class BaseGovernmentScraperAdapter implements SourceAdapter {
     throw lastError;
   }
 
+  private static strictIpv4Lookup(hostname: string, opts: any, cb: any) {
+    dns.lookup(hostname, { family: 4, all: true }, (err, addresses) => {
+      if (err) return cb(err);
+      const ipv4s = (addresses || []).filter(a => a.family === 4);
+      if (ipv4s.length === 0) return cb(new Error(`No IPv4 address resolved for ${hostname}`));
+      if (opts && opts.all) {
+        cb(null, ipv4s);
+      } else {
+        cb(null, ipv4s[0].address, 4);
+      }
+    });
+  }
+
   private httpRequestWithLegacySsl(
     urlStr: string,
     headers: Record<string, string>,
@@ -86,7 +99,7 @@ export abstract class BaseGovernmentScraperAdapter implements SourceAdapter {
           method: 'GET',
           headers,
           agent,
-          family: 4, // Strictly force IPv4
+          lookup: BaseGovernmentScraperAdapter.strictIpv4Lookup,
           timeout: timeoutMs,
         },
         (res) => {

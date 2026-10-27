@@ -78,8 +78,9 @@ export class IngestionCoordinator {
         console.log(`[IngestionCoordinator] Running in silent baseline onboarding mode for "${sourceId}" (existing notices in DB: ${existingNoticesCount || 0}). Live notifications will be suppressed.`);
       }
 
-      // 3. Fetch webpage & parse notices
-      const fetchResult = await adapter.fetchPage(sourceConfig?.fetch_timeout_ms || 15000);
+      // 3. Fetch webpage & parse notices (allow at least 45s for slow government servers)
+      const timeoutMs = Math.max(sourceConfig?.fetch_timeout_ms || 45000, 45000);
+      const fetchResult = await adapter.fetchPage(timeoutMs);
       const rawNotices = await adapter.parseNotices(fetchResult.html);
 
       let newItems = 0;

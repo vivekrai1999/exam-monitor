@@ -2,10 +2,10 @@ name: Rajasthan Exam Notice Monitor
 
 on:
   schedule:
-    # Mon-Sat, 9:00 AM to 7:30 PM IST (Peak office hours, every 15 minutes)
-    - cron: '*/15 3-14 * * 1-6'
-    # Mon-Sat, 7:30 PM to 10:30 PM IST (Evening release window, every 30 minutes)
-    - cron: '*/30 14-17 * * 1-6'
+    # Mon-Sat, 9:00 AM to 7:30 PM IST (Peak office hours, every 5 minutes for real-time 3-5 min detection)
+    - cron: '*/5 3-14 * * 1-6'
+    # Mon-Sat, 7:30 PM to 10:30 PM IST (Evening release window, every 10 minutes)
+    - cron: '*/10 14-17 * * 1-6'
     # Sunday standby check every 2 hours (9:30 AM to 7:30 PM IST)
     - cron: '0 4-14/2 * * 0'
   workflow_dispatch:
