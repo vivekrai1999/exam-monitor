@@ -8,7 +8,15 @@ import { parse as parseHtml } from 'node-html-parser';
 import crypto from 'node:crypto';
 import https from 'node:https';
 import http from 'node:http';
+import dns from 'node:dns';
 import { URL } from 'node:url';
+
+// Force Node to prefer IPv4 over IPv6.
+// Rajasthan government portals (rpsc/rssb.rajasthan.gov.in) silently drop IPv6 SYN packets,
+// causing dual-stack Happy Eyeballs in cloud runners (GitHub Actions) to hang and time out.
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {}
 
 export abstract class BaseGovernmentScraperAdapter implements SourceAdapter {
   abstract readonly sourceId: string;
@@ -19,44 +27,55 @@ export abstract class BaseGovernmentScraperAdapter implements SourceAdapter {
   protected abstract readonly containerSelector: string;
   protected abstract extractItemsFromDom(root: ReturnType<typeof parseHtml>): Promise<RawNoticeItem[]>;
 
-  async fetchPage(timeoutMs: number = 15000): Promise<FetchResult> {
-    try {
-      const result = await this.httpRequestWithLegacySsl(this.monitoredUrl, this.getRequestHeaders(), timeoutMs);
+  async fetchPage(timeoutMs: number = 30000): Promise<FetchResult> {
+    let lastError: any = null;
+    // Attempt request with 1 automatic retry
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const result = await this.httpRequestWithLegacySsl(this.monitoredUrl, this.getRequestHeaders(), timeoutMs);
 
-      if (result.status >= 500) {
-        throw new Error(`[${this.sourceId}] Server error HTTP ${result.status}`);
-      }
-      if (result.status === 429) {
-        throw new Error(`[${this.sourceId}] Rate limited HTTP 429 by government server`);
-      }
-      if (result.status === 403) {
-        throw new Error(`[${this.sourceId}] Forbidden HTTP 403 (possible WAF/IP block)`);
-      }
+        if (result.status >= 500) {
+          throw new Error(`[${this.sourceId}] Server error HTTP ${result.status}`);
+        }
+        if (result.status === 429) {
+          throw new Error(`[${this.sourceId}] Rate limited HTTP 429 by government server`);
+        }
+        if (result.status === 403) {
+          throw new Error(`[${this.sourceId}] Forbidden HTTP 403 (possible WAF/IP block)`);
+        }
 
-      return {
-        html: result.body,
-        httpStatus: result.status,
-        responseHeaders: result.headers,
-        fetchedAt: new Date(),
-      };
-    } catch (err: any) {
-      throw err;
+        return {
+          html: result.body,
+          httpStatus: result.status,
+          responseHeaders: result.headers,
+          fetchedAt: new Date(),
+        };
+      } catch (err: any) {
+        lastError = err;
+        if (attempt === 1) {
+          console.warn(`[${this.sourceId}] Fetch attempt 1 failed (${err.message}). Retrying in 2s...`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
+    throw lastError;
   }
 
   private httpRequestWithLegacySsl(
     urlStr: string,
     headers: Record<string, string>,
-    timeoutMs: number = 15000
+    timeoutMs: number = 30000
   ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
     return new Promise((resolve, reject) => {
       const url = new URL(urlStr);
       const isHttps = url.protocol === 'https:';
       const client = isHttps ? https : http;
 
+      // 0x00040000 = SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION (required for RSSB OpenSSL 3 handshakes)
       const agent = isHttps
         ? new https.Agent({
-            secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+            family: 4,
+            secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT | 0x00040000,
             rejectUnauthorized: false,
           })
         : undefined;
@@ -67,6 +86,7 @@ export abstract class BaseGovernmentScraperAdapter implements SourceAdapter {
           method: 'GET',
           headers,
           agent,
+          family: 4, // Strictly force IPv4
           timeout: timeoutMs,
         },
         (res) => {
