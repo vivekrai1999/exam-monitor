@@ -392,6 +392,8 @@ export class IngestionCoordinator {
         ignoreDuplicates: true,
       });
     }
+  }
+
   /**
    * Sorts scraped notices in ascending chronological order (oldest first, newest last).
    * Uses publicationDate ascending if available. If dates are equal or missing,
