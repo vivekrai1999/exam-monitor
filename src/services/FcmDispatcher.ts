@@ -48,6 +48,14 @@ export class FcmDispatcher {
 
     if (!jobs || jobs.length === 0) return 0;
 
+    // Ensure claimed batch is dispatched chronologically (oldest first, newest last)
+    jobs.sort((a, b) => {
+      const timeA = new Date(a.next_attempt_at || a.created_at).getTime();
+      const timeB = new Date(b.next_attempt_at || b.created_at).getTime();
+      if (timeA !== timeB) return timeA - timeB;
+      return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+    });
+
     for (const job of jobs) {
       try {
         const messageId = await this.dispatchFcmMessage(job);

@@ -69,8 +69,14 @@ export class IngestionCoordinator {
       let newItems = 0;
       let updatedItems = 0;
 
-      // 4. Ingest notices
-      for (const raw of rawNotices) {
+      // 4. Ingest notices in chronological order (oldest first, newest last).
+      // Government portals display notices descending (newest at top).
+      // We sort oldest-to-newest so they are persisted and enqueued in sequence,
+      // ensuring that when dispatched to Telegram and FCM, the newest notice is posted
+      // at the very bottom of the feed (most recent update in the chat).
+      const chronologicalNotices = this.sortChronologically(rawNotices);
+
+      for (const raw of chronologicalNotices) {
         const { isNew, isUpdated } = await this.processNoticeItem(adapter, raw, isBaseline);
         if (isNew) newItems++;
         if (isUpdated) updatedItems++;
@@ -386,6 +392,26 @@ export class IngestionCoordinator {
         ignoreDuplicates: true,
       });
     }
+  /**
+   * Sorts scraped notices in ascending chronological order (oldest first, newest last).
+   * Uses publicationDate ascending if available. If dates are equal or missing,
+   * preserves reverse-DOM order (items lower in the portal table are older than items at the top).
+   */
+  private sortChronologically(notices: RawNoticeItem[]): RawNoticeItem[] {
+    const indexed = notices.map((notice, index) => ({ notice, originalIndex: index }));
+    indexed.sort((a, b) => {
+      const dateA = a.notice.publicationDate ? new Date(a.notice.publicationDate).getTime() : 0;
+      const dateB = b.notice.publicationDate ? new Date(b.notice.publicationDate).getTime() : 0;
+
+      if (dateA !== dateB && dateA > 0 && dateB > 0) {
+        return dateA - dateB;
+      }
+
+      // Higher originalIndex was lower on the web page (older)
+      return b.originalIndex - a.originalIndex;
+    });
+
+    return indexed.map(item => item.notice);
   }
 
   private computeContentFingerprint(raw: RawNoticeItem): string {
