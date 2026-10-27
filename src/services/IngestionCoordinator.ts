@@ -58,9 +58,25 @@ export class IngestionCoordinator {
         .from('notification_sources')
         .select('*')
         .eq('id', sourceId)
-        .single();
+        .maybeSingle();
 
-      const isBaseline = sourceConfig?.baseline_status === 'pending' || sourceConfig?.baseline_status === 'initializing';
+      // Check count of notices already stored for this source
+      const { count: existingNoticesCount } = await this.supabase
+        .from('exam_notices')
+        .select('*', { count: 'exact', head: true })
+        .eq('source_id', sourceId);
+
+      // Baseline safety: If this is the initial onboarding run (0 existing notices in DB),
+      // OR baseline_status is pending/initializing, OR sourceConfig does not exist
+      const isBaseline =
+        !sourceConfig ||
+        sourceConfig.baseline_status === 'pending' ||
+        sourceConfig.baseline_status === 'initializing' ||
+        (existingNoticesCount === 0);
+
+      if (isBaseline) {
+        console.log(`[IngestionCoordinator] Running in silent baseline onboarding mode for "${sourceId}" (existing notices in DB: ${existingNoticesCount || 0}). Live notifications will be suppressed.`);
+      }
 
       // 3. Fetch webpage & parse notices
       const fetchResult = await adapter.fetchPage(sourceConfig?.fetch_timeout_ms || 15000);
@@ -216,9 +232,14 @@ export class IngestionCoordinator {
         return { isNew: false, isUpdated: false };
       }
 
-      // If NOT in baseline mode, enqueue outbox jobs for Telegram and FCM!
-      if (!isBaseline) {
+      // Guard: Only enqueue notifications if:
+      // 1. Not in baseline onboarding mode
+      // 2. Notice is fresh (published within last 7 days)
+      const isFresh = this.isNoticeFresh(inserted.publication_date, 7);
+      if (!isBaseline && isFresh) {
         await this.enqueueMultiChannelJobs(adapter, inserted, false);
+      } else if (!isFresh) {
+        console.log(`[IngestionCoordinator] Archived notice "${inserted.title.substring(0, 50)}..." without notifying (Date: ${inserted.publication_date || 'N/A'}, older than 7 days)`);
       }
 
       return { isNew: true, isUpdated: false };
@@ -270,7 +291,8 @@ export class IngestionCoordinator {
       .select('*')
       .single();
 
-    if (updated && !isBaseline) {
+    const isUpdateFresh = this.isNoticeFresh(updated?.publication_date, 7);
+    if (updated && !isBaseline && isUpdateFresh) {
       await this.enqueueMultiChannelJobs(adapter, updated, true);
     }
 
@@ -381,6 +403,7 @@ export class IngestionCoordinator {
           parse_mode: formattedPost.parse_mode,
           reply_markup: formattedPost.reply_markup,
           disable_web_page_preview: channel.disable_web_page_preview,
+          publication_date: notice.publicationDate,
         },
       });
     }
@@ -414,6 +437,31 @@ export class IngestionCoordinator {
     });
 
     return indexed.map(item => item.notice);
+  }
+
+  /**
+   * Checks whether a notice was published recently (within maxDays, default: 7 days).
+   * Notices older than maxDays (or from previous years) are considered archival history
+   * and must never trigger live notifications.
+   */
+  private isNoticeFresh(publicationDate?: string | null, maxDays: number = 7): boolean {
+    if (!publicationDate) {
+      return false; // If date is completely missing and unverified, do not broadcast as live alert
+    }
+
+    try {
+      const pubDate = new Date(publicationDate);
+      if (isNaN(pubDate.getTime())) return false;
+
+      const now = new Date();
+      const diffMs = now.getTime() - pubDate.getTime();
+      const diffDays = diffMs / (1000 * 60 * 60 * 24);
+
+      // Must be published within the last maxDays (allowing up to 1 day future clock skew)
+      return diffDays >= -1 && diffDays <= maxDays;
+    } catch {
+      return false;
+    }
   }
 
   private computeContentFingerprint(raw: RawNoticeItem): string {

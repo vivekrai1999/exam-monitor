@@ -31,6 +31,9 @@ export class TelegramDispatcher {
       return 0;
     }
 
+    // 0. Automatically purge any historical notices (> 7 days old) from the outbox
+    await this.purgeStalePendingJobs();
+
     // 1. Claim batch of jobs using RPC executing SKIP LOCKED
     const { data: jobs, error } = await this.supabase.rpc('claim_outbox_jobs', {
       p_destination_type: 'telegram_channel',
@@ -54,6 +57,17 @@ export class TelegramDispatcher {
 
     for (const job of jobs) {
       try {
+        // Freshness safety: Never publish historical notices older than 7 days
+        if (job.payload?.publication_date) {
+          const pubTime = new Date(job.payload.publication_date).getTime();
+          const ageDays = (Date.now() - pubTime) / (1000 * 60 * 60 * 24);
+          if (ageDays > 7) {
+            console.log(`[TelegramDispatcher] Skipping historical job ${job.id} (Date: ${job.payload.publication_date})`);
+            await this.markJobSkipped(job.id, 'Historical notice older than 7 days');
+            continue;
+          }
+        }
+
         await this.throttleChannel(job.destination_target);
 
         const result = await this.sendTelegramMessage({
@@ -194,5 +208,68 @@ export class TelegramDispatcher {
       response_body: err.responseBody || null,
       error_message: err.message,
     });
+  }
+
+  private async markJobSkipped(jobId: string, reason: string): Promise<void> {
+    try {
+      await this.supabase
+        .from('notification_outbox')
+        .update({
+          status: 'skipped',
+          last_error: reason,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', jobId);
+    } catch (err: any) {
+      console.warn(`[TelegramDispatcher] Error marking job ${jobId} as skipped:`, err.message);
+    }
+  }
+
+  private async purgeStalePendingJobs(): Promise<void> {
+    try {
+      const { data: pendingJobs } = await this.supabase
+        .from('notification_outbox')
+        .select('id, notice_id')
+        .eq('status', 'pending')
+        .eq('destination_type', 'telegram_channel')
+        .limit(300);
+
+      if (!pendingJobs || pendingJobs.length === 0) return;
+
+      const noticeIds = [...new Set(pendingJobs.map((j: any) => j.notice_id))];
+      const { data: notices } = await this.supabase
+        .from('exam_notices')
+        .select('id, publication_date')
+        .in('id', noticeIds);
+
+      const noticeMap = new Map((notices || []).map((n: any) => [n.id, n.publication_date]));
+      const now = Date.now();
+      const maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+      const staleIds: string[] = [];
+
+      for (const job of pendingJobs) {
+        const pubDateStr = noticeMap.get(job.notice_id);
+        if (pubDateStr) {
+          const pubTime = new Date(pubDateStr).getTime();
+          if (!isNaN(pubTime) && (now - pubTime) > maxAgeMs) {
+            staleIds.push(job.id);
+          }
+        }
+      }
+
+      if (staleIds.length > 0) {
+        console.log(`[TelegramDispatcher] Auto-purging ${staleIds.length} stale historical jobs (> 7 days old) to prevent channel spam.`);
+        await this.supabase
+          .from('notification_outbox')
+          .update({
+            status: 'skipped',
+            last_error: 'Purged: Historical notice older than 7 days',
+            updated_at: new Date().toISOString(),
+          })
+          .in('id', staleIds);
+      }
+    } catch (err: any) {
+      console.warn('[TelegramDispatcher] Error purging stale jobs:', err.message);
+    }
   }
 }
